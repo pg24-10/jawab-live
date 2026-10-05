@@ -1,4 +1,5 @@
 export const MODEL = "gemini-3.1-flash-lite";
+export const FALLBACK_MODEL = "gemini-3.5-flash-lite";
 export const MAX_OUTPUT_TOKENS = 300;
 export const DAILY_CAP = 5;
 export const MAX_INPUT_CHARS = 500;

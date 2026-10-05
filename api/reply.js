@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { MODEL, MAX_OUTPUT_TOKENS, DAILY_CAP, MAX_INPUT_CHARS, SYSTEM_PROMPT, RESPONSE_SCHEMA, buildUserPrompt } from "./_prompt.js";
+import { MODEL, FALLBACK_MODEL, MAX_OUTPUT_TOKENS, DAILY_CAP, MAX_INPUT_CHARS, SYSTEM_PROMPT, RESPONSE_SCHEMA, buildUserPrompt } from "./_prompt.js";
 import { sbInsert, sbCount } from "./_supabase.js";
 
 const SHOP_TYPES = ["Kirana / general store", "Fruits and vegetables", "Dairy and bakery", "Dry fruits and spices"];
@@ -31,23 +31,30 @@ export default async function handler(req, res) {
       return res.status(429).json({ error: `You've used all ${DAILY_CAP} free demo replies for today. Join the pilot for unlimited replies.`, remaining: 0 });
     }
 
+    // Call Gemini. Retry on temporary overload (429/503), then fall back to a sibling model.
     const t0 = Date.now();
-    const g = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: "user", parts: [{ text: buildUserPrompt({ message, shopType, prices }) }] }],
-        generationConfig: {
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
-          temperature: 0.4,
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      }),
+    const payload = JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents: [{ role: "user", parts: [{ text: buildUserPrompt({ message, shopType, prices }) }] }],
+      generationConfig: {
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
+        temperature: 0.4,
+        responseMimeType: "application/json",
+        responseSchema: RESPONSE_SCHEMA,
+      },
     });
-    const gj = await g.json();
-    if (!g.ok) throw new Error(gj.error?.message || "Gemini error");
+    let gj = null, usedModel = MODEL;
+    for (const [i, m] of [MODEL, MODEL, FALLBACK_MODEL].entries()) {
+      const g = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
+        body: payload,
+      });
+      gj = await g.json();
+      if (g.ok) { usedModel = m; break; }
+      if (![429, 500, 503].includes(g.status) || i === 2) throw new Error(gj.error?.message || "Gemini error");
+      await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+    }
 
     const text = (gj.candidates?.[0]?.content?.parts || []).map((p) => p.text).join("");
     let out;
@@ -66,7 +73,7 @@ export default async function handler(req, res) {
       input_tokens: usage.promptTokenCount || null,
       output_tokens: usage.candidatesTokenCount || null,
       latency_ms: Date.now() - t0,
-      model: MODEL,
+      model: usedModel,
     });
 
     return res.status(200).json({ ...out, remaining: DAILY_CAP - used - 1 });
