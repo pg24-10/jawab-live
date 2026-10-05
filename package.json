@@ -1,0 +1,6 @@
+{
+  "name": "jawab-live",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" }
+}
